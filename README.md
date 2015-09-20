@@ -9,7 +9,10 @@ Example:
 cabal run img.png out.png
 ```
 
+### Before
 ![before](https://raw.githubusercontent.com/afiodorov/keepOneColor/master/img.png)
+
+### After
 ![after](https://raw.githubusercontent.com/afiodorov/keepOneColor/master/out.png)
 
 -----
