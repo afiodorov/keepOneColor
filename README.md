@@ -16,6 +16,7 @@ KeepOneColor
 
 ------
 
+```
 Usage: keepOneColor INPUT OUTPUT [-k|--keep (R, G, B)]
                     [-b|--background (R, G, B)] [-r|--replace (R, G, B)]
   Removes all but one color
@@ -26,3 +27,4 @@ Available options:
   -b,--background (R, G, B)
                            rgb of a background color (default: (255, 255, 255))
   -r,--replace (R, G, B)   rgb of a replace color (default: (0, 0, 0))
+```
