@@ -1,7 +1,7 @@
 ## KeepOneColor
 
-A small utility for removing all but one color. Could be used in subtitle
-extraction.
+A small utility for removing all but one color. Could be used in preprocessing
+of images for subtitle extraction.
 
 Example:
 
