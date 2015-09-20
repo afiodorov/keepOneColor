@@ -6,7 +6,7 @@ import qualified Vision.Image as I
 import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
 import Options.Applicative
 
-description = progDesc "Removes all but one color"
+description = progDesc "Removes all but one colors"
 header' = header "KeepOneColor"
 
 yellow = I.RGBPixel 255 255 0
@@ -25,7 +25,7 @@ data Param = Param {
 readRGB :: String -> Either String I.RGBPixel
 readRGB s = case tripple of
     [((a, b, c), "")] | valid (a, b, c) -> Right (I.RGBPixel (f a) (f b) (f c))
-                      | otherwise -> Left "all digits between 0 and 255"
+                      | otherwise -> Left "all numbers between 0 and 255"
     _ -> Left "e.g. (2, 4, 5)"
     where
         valid (a, b, c) = all (\a -> 0 <= a && a <= 255) [a, b, c]
@@ -48,13 +48,13 @@ argparser = Param
                <> showDefaultWith showRGB)
     <*> option (eitherReader readRGB)
                (long "background" <> short 'b'
-               <> help "rgb of a background color"
+               <> help "rgb of the background color"
                <> metavar "(R, G, B)"
                <> value white
                <> showDefaultWith showRGB)
     <*> option (eitherReader readRGB)
                (long "replace" <> short 'r'
-               <> help "rgb of a replace color"
+               <> help "rgb of a replacement color"
                <> metavar "(R, G, B)"
                <> value black
                <> showDefaultWith showRGB)
