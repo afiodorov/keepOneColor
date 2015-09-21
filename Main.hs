@@ -1,10 +1,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 import System.IO (stderr, hPrint, hPutStrLn)
-import System.Environment (getArgs)
 import qualified Vision.Image as I
 import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
-import Options.Applicative
+import Options.Applicative (header, progDesc, Parser, argument, option, str,
+    metavar, long, eitherReader, value, short, help, showDefaultWith, (<>),
+    execParser, info, helper, fullDesc)
 
 description = progDesc "Removes all but one colors"
 header' = header "KeepOneColor"
@@ -24,11 +25,11 @@ data Param = Param {
 
 readRGB :: String -> Either String I.RGBPixel
 readRGB s = case tripple of
-    [((a, b, c), "")] | valid (a, b, c) -> Right (I.RGBPixel (f a) (f b) (f c))
+    [((a, b, c), "")] | valid [a, b, c] -> Right (I.RGBPixel (f a) (f b) (f c))
                       | otherwise -> Left "all numbers between 0 and 255"
     _ -> Left "e.g. (2, 4, 5)"
     where
-        valid (a, b, c) = all (\a -> 0 <= a && a <= 255) [a, b, c]
+        valid = all (\a -> 0 <= a && a <= 255)
         tripple = reads s :: [((Int, Int, Int), String)]
         f = fromIntegral
 
