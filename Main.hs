@@ -1,7 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
+import Data.Maybe (fromMaybe)
+import Debug.Trace (trace)
 import System.IO (stderr, hPrint, hPutStrLn)
 import qualified Vision.Image as I
+import qualified Vision.Primitive as P
 import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
 import Options.Applicative (header, progDesc, Parser, argument, option, str,
     metavar, long, eitherReader, value, short, help, showDefaultWith, (<>),
@@ -73,7 +76,7 @@ runWithOptions opts = do
             hPrint stderr err
         Right (rgb :: I.RGB) -> do
             mErr <- save Autodetect (fileOut opts)
-                (I.map (processPixels opts) rgb :: I.RGB)
+                (fromMasked black (processImage rgb))
             case mErr of
                 Nothing -> return ()
                 Just err -> do
@@ -82,3 +85,34 @@ runWithOptions opts = do
 
 processPixels :: Param -> I.RGBPixel -> I.RGBPixel
 processPixels opts p = if p == colorToKeep opts then replaceColor opts else bgColor opts
+
+fromMasked :: I.RGBPixel ->  I.DelayedMask I.RGBPixel -> I.RGB
+fromMasked color masked = I.fromFunction (I.shape masked) unMaskedPixel
+    where unMaskedPixel pixel = fromMaybe color (masked `I.maskedIndex` pixel)
+
+
+processImage :: I.RGB -> I.DelayedMask I.RGBPixel
+processImage img = I.fromFunction (I.shape img) $ \pt ->
+        if filterImg pt img then Just (img `I.index` pt) else Nothing
+
+{-extractBlobs :: I.DelayedMask I.RGBPixel -> [I.DelayedMask I.RGBPixel-}
+{-removeBlobs img = I.fromFunction (I.shape img) pixel-}
+
+
+{-filterImg pt img = elem (I.index img pt) $ getNeighboors pt img-}
+filterImg :: P.Point -> I.RGB -> Bool
+filterImg pt img =
+    length sameColored >= 6
+    where
+    sameColored = filter (I.index img pt ==) $ getNeighboors pt img
+
+getNeighboors :: P.Point -> I.RGB -> [I.RGBPixel]
+getNeighboors pt img = let
+        P.Z P.:. w P.:. h = I.shape img
+        P.Z P.:. x P.:. y = pt
+        add (a, b) (c, d) = (a + c, b + d)
+        l = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+        allNeigboors = zipWith add (replicate (length l) (x, y)) l
+        validNeigboors = filter (\(a, b) -> 0 <= a && a < w && 0 <= b && b < h) allNeigboors
+    in
+    map (I.index img . uncurry P.ix2) validNeigboors
