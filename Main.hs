@@ -8,7 +8,6 @@ import Debug.Trace (trace, traceIO, traceStack)
 import System.IO (stderr, hPrint, hPutStrLn)
 import qualified Vision.Image as I
 import qualified Vision.Primitive as P
-import qualified Data.Vector.Unboxed.Mutable as M
 import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
 import Options.Applicative (header, progDesc, Parser, argument, option, str,
     metavar, long, eitherReader, value, short, help, showDefaultWith, (<>),
@@ -131,7 +130,7 @@ allBlobs img = allBlobs' (createBlobImg img)
         allBlobs' (Just (blob, imgOut)) = blob : allBlobs' (createBlobImg imgOut)
 
 
-type BlobState a = (I.DelayedMask a, I.DelayedMask a, V.Vector P.Point)
+type BlobState a = V.Vector P.Point
 
 
 extractBlob :: (Storable a) => I.DelayedMask a -> P.Point -> State (BlobState a) [P.Point]
@@ -153,20 +152,14 @@ extractBlob img pt = let
 
 visitSite :: (Storable a) => I.DelayedMask a -> P.Point -> State (BlobState a) (Maybe P.Point)
 visitSite img p = do
-    (blobImg, oldImg, visitedPoints) <- get
+    visitedPoints <- get
     if p `V.elem` visitedPoints then
         return Nothing
-    else let visitedPoints' = V.snoc visitedPoints p in
+    else let visitedPoints' = V.snoc visitedPoints p in do
+        put visitedPoints'
         if isNothing (img `I.maskedIndex` p)
-            then do
-                put (blobImg, oldImg, visitedPoints')
-                return Nothing
-            else let
-                    blobImg' = I.fromFunction (I.shape blobImg) (\pt -> if pt == p then oldImg I.!? pt else blobImg I.!? pt)
-                    oldImg' = I.fromFunction (I.shape oldImg) (\pt -> if pt == p then Nothing else oldImg I.!? pt)
-                in do
-                put (blobImg', oldImg', visitedPoints')
-                return (Just p)
+            then return Nothing
+            else return (Just p)
 
 findNonEmpty :: Foreign.Storable.Storable a => I.DelayedMask a -> Maybe P.Point
 findNonEmpty img = let
@@ -183,9 +176,11 @@ createBlobImg img = let startingPixel = findNonEmpty img in
         Nothing -> Nothing
         Just pt -> Just (blobImg, outImg)
             where
-                empty = I.fromFunction (I.shape img) (const Nothing)
-                initState = (empty, img, V.fromList [])
-                (blobPoints, (blobImg, outImg, _)) = runState (extractBlob img pt) initState
+                initState = V.fromList []
+                blobPoints = evalState (extractBlob img pt) initState
+                blobPoints' = V.fromList blobPoints
+                blobImg = I.fromFunction (I.shape img) (\pt -> if pt `V.elem` blobPoints' then img I.!? pt else Nothing)
+                outImg = I.fromFunction (I.shape img) (\pt -> if pt `V.elem` blobPoints' then Nothing else img I.!? pt)
 
 
 filterImg :: P.Point -> I.RGB -> Bool
