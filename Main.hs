@@ -1,14 +1,26 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
-import Data.Maybe (fromMaybe)
-import Debug.Trace (trace)
+import qualified Data.Vector as V
+import Control.Monad.State
+import Foreign.Storable (Storable)
+import Data.Maybe (fromMaybe, isNothing, catMaybes, fromJust)
+import Debug.Trace (trace, traceIO, traceStack)
 import System.IO (stderr, hPrint, hPutStrLn)
 import qualified Vision.Image as I
 import qualified Vision.Primitive as P
+import qualified Data.Vector.Unboxed.Mutable as M
 import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
 import Options.Applicative (header, progDesc, Parser, argument, option, str,
     metavar, long, eitherReader, value, short, help, showDefaultWith, (<>),
     execParser, info, helper, fullDesc)
+import Control.Monad (msum)
+import Control.Monad.ST
+
+type Pixels = [P.Point]
+data Blob a = Blob {
+    color :: a,
+    pixels :: Pixels
+}
 
 description = progDesc "Removes all but one colors"
 header' = header "KeepOneColor"
@@ -75,8 +87,25 @@ runWithOptions opts = do
             hPutStrLn stderr "Unable to load image:"
             hPrint stderr err
         Right (rgb :: I.RGB) -> do
+            {-saveBlobs (processImage rgb)-}
             mErr <- save Autodetect (fileOut opts)
-                (fromMasked black (processImage rgb))
+                (fromMasked black (fst . fromJust $ createBlobImg (processImage rgb)))
+            case mErr of
+                Nothing -> return ()
+                Just err -> do
+                    hPutStrLn stderr "Unable to save the image:"
+                    hPrint stderr err
+
+saveBlobs :: I.DelayedMask I.RGBPixel -> IO ()
+saveBlobs img = sequence_ actions
+    where
+    names = map (("tmp/" ++) . show) [1..]
+    namesWithExt = map (++ ".png") names
+    blobImages = map (fromMasked black) (allBlobs img) :: [I.RGB]
+    actions = zipWith saveImage namesWithExt blobImages
+    saveImage :: String -> I.RGB -> IO ()
+    saveImage path img = do
+            mErr <- save Autodetect path img
             case mErr of
                 Nothing -> return ()
                 Just err -> do
@@ -95,11 +124,70 @@ processImage :: I.RGB -> I.DelayedMask I.RGBPixel
 processImage img = I.fromFunction (I.shape img) $ \pt ->
         if filterImg pt img then Just (img `I.index` pt) else Nothing
 
-{-extractBlobs :: I.DelayedMask I.RGBPixel -> [I.DelayedMask I.RGBPixel-}
-{-removeBlobs img = I.fromFunction (I.shape img) pixel-}
+allBlobs :: I.DelayedMask I.RGBPixel -> [I.DelayedMask I.RGBPixel]
+allBlobs img = allBlobs' (createBlobImg img)
+    where
+        allBlobs' Nothing = []
+        allBlobs' (Just (blob, imgOut)) = blob : allBlobs' (createBlobImg imgOut)
 
 
-{-filterImg pt img = elem (I.index img pt) $ getNeighboors pt img-}
+type BlobState a = (I.DelayedMask a, I.DelayedMask a, V.Vector P.Point)
+
+
+extractBlob :: (Storable a) => I.DelayedMask a -> P.Point -> State (BlobState a) [P.Point]
+extractBlob img pt = let
+    P.Z P.:. w P.:. h = I.shape img
+    P.Z P.:. x P.:. y = pt
+    l = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
+    add (a, b) (c, d) = (a + c, b + d)
+    allNeigboors = zipWith add (replicate (length l) (x, y)) l
+    validNeigboors = filter (\(a, b) -> 0 <= a && a < w && 0 <= b && b < h) allNeigboors
+    validNeigboors' = map (uncurry P.ix2) validNeigboors
+    walk = map (extractBlob img) validNeigboors'
+    in do
+        attempt <- visitSite img pt
+        case attempt of
+            Just site -> (liftM concat . sequence) $ return [site] : walk
+            _         -> return []
+
+
+visitSite :: (Storable a) => I.DelayedMask a -> P.Point -> State (BlobState a) (Maybe P.Point)
+visitSite img p = do
+    (blobImg, oldImg, visitedPoints) <- get
+    if p `V.elem` visitedPoints then
+        return Nothing
+    else let visitedPoints' = V.snoc visitedPoints p in
+        if isNothing (img `I.maskedIndex` p)
+            then do
+                put (blobImg, oldImg, visitedPoints')
+                return Nothing
+            else let
+                    blobImg' = I.fromFunction (I.shape blobImg) (\pt -> if pt == p then oldImg I.!? pt else blobImg I.!? pt)
+                    oldImg' = I.fromFunction (I.shape oldImg) (\pt -> if pt == p then Nothing else oldImg I.!? pt)
+                in do
+                put (blobImg', oldImg', visitedPoints')
+                return (Just p)
+
+findNonEmpty :: Foreign.Storable.Storable a => I.DelayedMask a -> Maybe P.Point
+findNonEmpty img = let
+    P.Z P.:. w P.:. h = I.shape img
+    indices = map (uncurry P.ix2) [(x, y) | x <- [0..(w - 1)], y <- [0..(h-1)]]
+    values = map (I.maskedIndex img) indices
+    nonEmptyIndices = zipWith (\a b -> if isNothing b then Nothing else Just a) indices values
+    in
+    msum nonEmptyIndices
+
+createBlobImg :: I.DelayedMask I.RGBPixel -> Maybe (I.DelayedMask I.RGBPixel, I.DelayedMask I.RGBPixel)
+createBlobImg img = let startingPixel = findNonEmpty img in
+    case startingPixel of
+        Nothing -> Nothing
+        Just pt -> Just (blobImg, outImg)
+            where
+                empty = I.fromFunction (I.shape img) (const Nothing)
+                initState = (empty, img, V.fromList [])
+                (blobPoints, (blobImg, outImg, _)) = runState (extractBlob img pt) initState
+
+
 filterImg :: P.Point -> I.RGB -> Bool
 filterImg pt img =
     length sameColored >= 6
