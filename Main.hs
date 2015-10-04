@@ -2,7 +2,7 @@
 
 import qualified Data.Vector as V
 import Foreign.Storable (Storable)
-import Data.Maybe (fromMaybe, isNothing, catMaybes, fromJust)
+import Data.Maybe (fromMaybe, isNothing, isJust, catMaybes, fromJust)
 import Debug.Trace (trace, traceIO, traceStack)
 import System.IO (stderr, hPrint, hPutStrLn)
 import qualified Vision.Image as I
@@ -14,7 +14,7 @@ import Options.Applicative (header, progDesc, Parser, argument, option, str,
 import Control.Monad (msum, when)
 import Control.Monad.ST
 import Data.Array.ST
-import Data.Array.Unboxed
+import Data.Array.Unboxed (bounds, (!), UArray, elems)
 
 type Pixels = [P.Point]
 data Blob a = Blob {
@@ -87,9 +87,9 @@ runWithOptions opts = do
             hPutStrLn stderr "Unable to load image:"
             hPrint stderr err
         Right (rgb :: I.RGB) -> do
-            {-saveBlobs (processImage rgb)-}
+            saveBlobs (processImage rgb)
             mErr <- save Autodetect (fileOut opts)
-                (fromMasked black (fst . fromJust $ createBlobImg (processImage rgb)))
+                (fromMasked black (processImage rgb))
             case mErr of
                 Nothing -> return ()
                 Just err -> do
@@ -134,44 +134,36 @@ allBlobs img = allBlobs' (createBlobImg img)
 type BlobState s = STUArray s (Int, Int) Bool
 
 extractBlob :: (Storable a) => I.DelayedMask a -> P.Point -> UArray (Int, Int) Bool
-extractBlob img pt = runSTUArray $ let (w, h)  = toTuple (I.shape img) in do
-            blobArr <- newArray ((0, w), (0, h)) False
-            visitArr <- newArray ((0, w), (0, h)) False
+extractBlob img pt = runSTUArray $ let (w, h) = toTuple (I.shape img) in do
+            blobArr <- newArray ((0, 0), (w, h)) False
+            visitArr <- newArray ((0, 0), (w, h)) False
             extractBlob' img visitArr blobArr pt
             return blobArr
 
 
 extractBlob' :: (Storable a) => I.DelayedMask a -> BlobState s -> BlobState s -> P.Point  -> ST s ()
 extractBlob' img visitArr blobArr pt = let
-    P.Z P.:. w P.:. h = I.shape img
-    l = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
-    add (a, b) (c, d) = (a + c, b + d)
-    allNeigboors = zipWith add (replicate (length l) (toTuple pt)) l
-    validNeigboors = filter (\(a, b) -> 0 <= a && a < w && 0 <= b && b < h) allNeigboors
-    validNeigboors' = map (uncurry P.ix2) validNeigboors
+    validNeigboors' = map (uncurry P.ix2) (validNeigboors (I.shape img) pt)
     walk = map (extractBlob' img visitArr blobArr) validNeigboors'
     in do
-        attempt <- visitSite img pt visitArr
-        when attempt $ do
-                    writeArray blobArr (toTuple pt) True
-                    sequence_ walk
+        isNotVisited <- visitSite img pt visitArr
+        when (isNotVisited && isJust (img I.!? pt)) $ do
+            writeArray blobArr (toTuple pt) True
+            sequence_ walk
 
 
 visitSite :: (Storable a) => I.DelayedMask a -> P.Point -> BlobState s -> ST s Bool
-visitSite img p arr = do
-    visited <- readArray arr (toTuple p)
-    if visited then
-        return False
+visitSite img p isVisitedArr = do
+    visited <- readArray isVisitedArr (toTuple p)
+    if visited then return False
     else do
-        writeArray arr (toTuple p) True
-        if isNothing (img `I.maskedIndex` p)
-            then return True
-            else return False
+        writeArray isVisitedArr (toTuple p) True
+        return True
 
 findNonEmpty :: Foreign.Storable.Storable a => I.DelayedMask a -> Maybe P.Point
 findNonEmpty img = let
     P.Z P.:. w P.:. h = I.shape img
-    indices = map (uncurry P.ix2) [(x, y) | x <- [0..(w - 1)], y <- [0..(h-1)]]
+    indices = map (uncurry P.ix2) [(x, y) | x <- [0..(w - 1)], y <- [0..(h - 1)]]
     values = map (I.maskedIndex img) indices
     nonEmptyIndices = zipWith (\a b -> if isNothing b then Nothing else Just a) indices values
     in
@@ -195,15 +187,17 @@ filterImg pt img =
     sameColored = filter (I.index img pt ==) $ getNeighboors pt img
 
 getNeighboors :: P.Point -> I.RGB -> [I.RGBPixel]
-getNeighboors pt img = let
-        P.Z P.:. w P.:. h = I.shape img
-        P.Z P.:. x P.:. y = pt
-        add (a, b) (c, d) = (a + c, b + d)
-        l = [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]
-        allNeigboors = zipWith add (replicate (length l) (x, y)) l
-        validNeigboors = filter (\(a, b) -> 0 <= a && a < w && 0 <= b && b < h) allNeigboors
-    in
-    map (I.index img . uncurry P.ix2) validNeigboors
+getNeighboors pt img = map (I.index img . uncurry P.ix2) (validNeigboors (I.shape img) pt)
 
 toTuple :: P.Point -> (Int, Int)
 toTuple p = let P.Z P.:. x P.:. y = p in (x, y)
+
+validNeigboors :: P.Point -> P.Point -> [(Int, Int)]
+validNeigboors shape pt = let
+        P.Z P.:. w P.:. h = shape
+        P.Z P.:. x P.:. y = pt
+        add (a, b) (c, d) = (a + c, b + d)
+        l = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+        allNeigboors = zipWith add (replicate (length l) (x, y)) l
+        in
+        filter (\(a, b) -> 0 <= a && a < w && 0 <= b && b < h) allNeigboors
