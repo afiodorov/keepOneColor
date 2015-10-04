@@ -62,7 +62,8 @@ executable keepOneColor
     friday-devil == 0.1.1.1,
     optparse-applicative == 0.11.0,
     mtl == 2.2.1,
-    vector == 0.11.0.0
+    vector == 0.11.0.0,
+    array == 0.5.1.0
 
   -- Directories containing source files.
   -- hs-source-dirs:
