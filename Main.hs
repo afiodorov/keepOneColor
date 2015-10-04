@@ -1,8 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
+import Data.Array.Base  (unsafeFreezeSTUArray)
 import qualified Data.Vector as V
 import Foreign.Storable (Storable)
-import Data.Maybe (fromMaybe, isNothing, isJust, catMaybes, fromJust)
+import Data.Maybe (fromMaybe, isNothing, isJust, catMaybes, fromJust, listToMaybe)
 import Debug.Trace (trace, traceIO, traceStack)
 import System.IO (stderr, hPrint, hPutStrLn)
 import qualified Vision.Image as I
@@ -11,16 +12,11 @@ import Vision.Image.Storage.DevIL (Autodetect (..), load, save)
 import Options.Applicative (header, progDesc, Parser, argument, option, str,
     metavar, long, eitherReader, value, short, help, showDefaultWith, (<>),
     execParser, info, helper, fullDesc)
-import Control.Monad (msum, when)
+import Control.Monad (msum, when, guard)
 import Control.Monad.ST
 import Data.Array.ST
-import Data.Array.Unboxed (bounds, (!), UArray, elems)
-
-type Pixels = [P.Point]
-data Blob a = Blob {
-    color :: a,
-    pixels :: Pixels
-}
+import Data.Array.Unboxed (bounds, (!), UArray, elems, assocs)
+import Data.STRef
 
 description = progDesc "Removes all but one colors"
 header' = header "KeepOneColor"
@@ -125,30 +121,54 @@ processImage img = I.fromFunction (I.shape img) $ \pt ->
         if filterImg pt img then Just (img `I.index` pt) else Nothing
 
 allBlobs :: I.DelayedMask I.RGBPixel -> [I.DelayedMask I.RGBPixel]
-allBlobs img = allBlobs' (createBlobImg img)
+allBlobs img = runST $ do
+    mask <- newArray ((0, 0), toTuple (I.shape img)) False
+    blob <- createBlob img mask
+    if isJust blob && validBlob (fromJust blob)
+        then return [blobToImg (fromJust blob)]
+        else return []
     where
-        allBlobs' Nothing = []
-        allBlobs' (Just (blob, imgOut)) = blob : allBlobs' (createBlobImg imgOut)
+        validBlob :: Blob a -> Bool
+        validBlob b = number b >= 10
+        blobToImg :: Blob I.RGBPixel -> I.DelayedMask I.RGBPixel
+        blobToImg blob = I.fromFunction (I.shape img) $ \px ->
+            if pixArr blob ! toTuple px then img I.!? px else Nothing
+
+
 
 
 type BlobState s = STUArray s (Int, Int) Bool
 
-extractBlob :: (Storable a) => I.DelayedMask a -> P.Point -> UArray (Int, Int) Bool
-extractBlob img pt = runSTUArray $ let (w, h) = toTuple (I.shape img) in do
-            blobArr <- newArray ((0, 0), (w, h)) False
-            visitArr <- newArray ((0, 0), (w, h)) False
-            extractBlob' img visitArr blobArr pt
-            return blobArr
+data Blob a = Blob {
+    color :: a,
+    number :: Int,
+    pixArr :: UArray (Int, Int) Bool
+}
+
+extractBlob :: (Storable a) => I.DelayedMask a -> P.Point -> Maybe (Blob a)
+extractBlob img pt = let color = img I.!? pt in
+    if isNothing color then Nothing else
+        Just Blob {color=fromJust color, number=counter, pixArr=pixArr}
+    where
+        (pixArr, counter) = runST $ let (w, h) = toTuple (I.shape img) in do
+                blobArr <- newArray ((0, 0), (w, h)) False
+                visitArr <- newArray ((0, 0), (w, h)) False
+                counter <- newSTRef 0
+                extractBlob' img visitArr blobArr counter pt
+                count <- readSTRef counter
+                pixArr <- unsafeFreezeSTUArray blobArr
+                return (pixArr, count)
 
 
-extractBlob' :: (Storable a) => I.DelayedMask a -> BlobState s -> BlobState s -> P.Point  -> ST s ()
-extractBlob' img visitArr blobArr pt = let
+extractBlob' :: (Storable a) => I.DelayedMask a -> BlobState s -> BlobState s -> STRef s Int -> P.Point -> ST s ()
+extractBlob' img visitArr blobArr counter pt = let
     validNeigboors' = map (uncurry P.ix2) (validNeigboors (I.shape img) pt)
-    walk = map (extractBlob' img visitArr blobArr) validNeigboors'
+    walk = map (extractBlob' img visitArr blobArr counter) validNeigboors'
     in do
         isNotVisited <- visitSite img pt visitArr
         when (isNotVisited && isJust (img I.!? pt)) $ do
             writeArray blobArr (toTuple pt) True
+            modifySTRef counter (+ 1)
             sequence_ walk
 
 
@@ -160,24 +180,28 @@ visitSite img p isVisitedArr = do
         writeArray isVisitedArr (toTuple p) True
         return True
 
-findNonEmpty :: Foreign.Storable.Storable a => I.DelayedMask a -> Maybe P.Point
-findNonEmpty img = let
-    P.Z P.:. w P.:. h = I.shape img
-    indices = map (uncurry P.ix2) [(x, y) | x <- [0..(w - 1)], y <- [0..(h - 1)]]
-    values = map (I.maskedIndex img) indices
-    nonEmptyIndices = zipWith (\a b -> if isNothing b then Nothing else Just a) indices values
-    in
-    msum nonEmptyIndices
+findNonEmpty :: BlobState s -> ST s (Maybe (Int, Int))
+findNonEmpty state = do
+    assocs <- getAssocs state
+    return (listToMaybe (keepIndices assocs))
+    where
+        keepIndices l = map fst (filter (not . snd) l)
 
-createBlobImg :: I.DelayedMask I.RGBPixel -> Maybe (I.DelayedMask I.RGBPixel, I.DelayedMask I.RGBPixel)
-createBlobImg img = let startingPixel = findNonEmpty img in
+
+
+createBlob :: (Storable a) => I.DelayedMask a -> BlobState s -> ST s (Maybe (Blob a))
+createBlob img mask = do
+    startingPixel <- findNonEmpty mask
     case startingPixel of
-        Nothing -> Nothing
-        Just pt -> Just (blobImg, outImg)
+        Nothing -> return Nothing
+        Just pt -> if isJust blob then
+            let blobIndices = map fst (filter snd (assocs (pixArr (fromJust blob))))
+                in do
+                mapM_ (\x -> writeArray mask x True) blobIndices
+                return Nothing
+        else return Nothing
             where
-                blobPoints = extractBlob img pt
-                blobImg = I.fromFunction (I.shape img) (\pt -> if blobPoints ! toTuple pt then img I.!? pt else Nothing)
-                outImg = I.fromFunction (I.shape img) (\pt -> if blobPoints ! toTuple pt then Nothing else img I.!? pt)
+                blob = extractBlob img (uncurry P.ix2 pt)
 
 
 filterImg :: P.Point -> I.RGB -> Bool
